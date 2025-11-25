@@ -1,0 +1,35 @@
+name: smart_band_app
+description: "A new Flutter project for ESP32 Fall Detection."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.10.1
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # --- UI Utilities ---
+  cupertino_icons: ^1.0.8
+  google_fonts: ^6.1.0  # Font chữ đẹp hơn
+  intl: ^0.20.2         # Để format ngày tháng
+
+  # --- Data & Logic ---
+  permission_handler: ^12.0.1 # Xin quyền truy cập file/bluetooth
+  path_provider: ^2.1.2       # Lấy đường dẫn thư mục để lưu file
+  csv: ^6.0.0                 # Xuất file CSV
+
+  # --- Visualization ---
+  fl_chart: ^1.1.1           # Vẽ biểu đồ (Phase sau)
+
+  # --- Connectivity ---
+  # flutter_blue_plus: ^1.30.0 # (Sẽ mở comment ở Phase BLE)
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

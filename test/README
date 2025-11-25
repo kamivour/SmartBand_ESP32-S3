@@ -1,0 +1,12 @@
+# ESP32-S3 Communicate with Flutter App
+## UDP catching test (Windows PowerShell)
+$port = 4210
+$udp = New-Object System.Net.Sockets.UdpClient $port
+Write-Host "Dang lang nghe JSON tren Port $port..."
+while ($true) {
+    $remote = $null
+    $data = $udp.Receive([ref]$remote)
+    # Chuyen byte sang string de hien thi JSON
+    $str = [System.Text.Encoding]::ASCII.GetString($data)
+    Write-Host $str
+}
