@@ -55,7 +55,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   double _x = 0;
   
   // UI state
-  bool _showAngles = true;
   bool _showGraph = true;
   
   // Recording
@@ -200,30 +199,107 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
-  Widget _buildChart() {
-    final spots1 = _showAngles ? _pitchSpots : _gxSpots;
-    final spots2 = _showAngles ? _rollSpots : _gySpots;
-    final spots3 = _showAngles ? _svmSpots : _gzSpots;
+  Widget _buildDualChart() {
+    if (_pitchSpots.isEmpty) return const Center(child: Text('Waiting for data...', style: TextStyle(color: Colors.white54)));
     
-    if (spots1.isEmpty) return const Center(child: Text('Waiting for data...', style: TextStyle(color: Colors.white54)));
+    final isPortrait = MediaQuery.of(context).orientation == Orientation.portrait;
     
-    final minY = _showAngles ? -180.0 : -500.0;
-    final maxY = _showAngles ? 180.0 : 500.0;
+    final anglesChart = _buildSingleChart(
+      spots: [_pitchSpots, _rollSpots, _svmSpots],
+      minY: -180.0,
+      maxY: 180.0,
+      title: 'ANGLES',
+      legend: [('Pitch', Colors.redAccent), ('Roll', Colors.greenAccent), ('SVM', Colors.blueAccent)],
+    );
     
-    return LineChart(
-      LineChartData(
-        gridData: const FlGridData(show: false),
-        titlesData: const FlTitlesData(show: false),
-        borderData: FlBorderData(show: true, border: Border.all(color: Colors.white24)),
-        minY: minY, maxY: maxY,
-        minX: spots1.first.x, maxX: spots1.last.x,
-        lineBarsData: [
-          _line(spots1, Colors.redAccent),
-          _line(spots2, Colors.greenAccent),
-          _line(spots3, Colors.blueAccent),
+    final gyroChart = _buildSingleChart(
+      spots: [_gxSpots, _gySpots, _gzSpots],
+      minY: -500.0,
+      maxY: 500.0,
+      title: 'GYROSCOPE',
+      legend: [('X', Colors.redAccent), ('Y', Colors.greenAccent), ('Z', Colors.blueAccent)],
+    );
+    
+    if (isPortrait) {
+      return Column(
+        children: [
+          Expanded(child: anglesChart),
+          const Divider(height: 1, color: Colors.white24),
+          Expanded(child: gyroChart),
+        ],
+      );
+    } else {
+      return Row(
+        children: [
+          Expanded(child: anglesChart),
+          const VerticalDivider(width: 1, color: Colors.white24),
+          Expanded(child: gyroChart),
+        ],
+      );
+    }
+  }
+  
+  Widget _buildSingleChart({
+    required List<List<FlSpot>> spots,
+    required double minY,
+    required double maxY,
+    required String title,
+    required List<(String, Color)> legend,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.all(8),
+      child: Column(
+        children: [
+          Text(title, style: const TextStyle(color: Colors.teal, fontWeight: FontWeight.bold, fontSize: 11)),
+          const SizedBox(height: 4),
+          Expanded(
+            child: LineChart(
+              LineChartData(
+                gridData: FlGridData(show: true, drawVerticalLine: false, getDrawingHorizontalLine: (value) => const FlLine(color: Colors.white10, strokeWidth: 0.5)),
+                titlesData: FlTitlesData(
+                  show: true,
+                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  bottomTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 40,
+                      getTitlesWidget: (value, meta) => Text(
+                        value.toInt().toString(),
+                        style: const TextStyle(color: Colors.white54, fontSize: 10),
+                      ),
+                    ),
+                  ),
+                ),
+                borderData: FlBorderData(show: true, border: Border.all(color: Colors.white24)),
+                minY: minY,
+                maxY: maxY,
+                minX: spots[0].first.x,
+                maxX: spots[0].last.x,
+                lineBarsData: [
+                  _line(spots[0], legend[0].$2),
+                  _line(spots[1], legend[1].$2),
+                  _line(spots[2], legend[2].$2),
+                ],
+              ),
+              duration: Duration.zero,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: legend.map((e) => Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              child: Row(children: [
+                Container(width: 12, height: 2, color: e.$2),
+                const SizedBox(width: 4),
+                Text(e.$1, style: const TextStyle(color: Colors.white70, fontSize: 10)),
+              ]),
+            )).toList(),
+          ),
         ],
       ),
-      duration: Duration.zero,
     );
   }
 
@@ -274,33 +350,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
     ),
   );
 
-  Widget _legend() {
-    final items = _showAngles
-      ? [('Pitch', Colors.redAccent), ('Roll', Colors.greenAccent), ('SVM', Colors.blueAccent)]
-      : [('X', Colors.redAccent), ('Y', Colors.greenAccent), ('Z', Colors.blueAccent)];
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: items.map((e) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        child: Row(children: [
-          Container(width: 12, height: 2, color: e.$2),
-          const SizedBox(width: 4),
-          Text(e.$1, style: const TextStyle(color: Colors.white70, fontSize: 11)),
-        ]),
-      )).toList(),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[100],
+      backgroundColor: const Color(0xFF241E4E),
       body: Column(
         children: [
           // Chart area
           Container(
             height: MediaQuery.of(context).size.height * 0.6,
-            color: Colors.grey[900],
+            color: const Color(0xFF181330),
             padding: const EdgeInsets.fromLTRB(8, 40, 8, 8),
             child: Column(
               children: [
@@ -316,32 +375,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       ),
                       child: Text('${_data['bat']}%', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
                     ),
-                    const SizedBox(width: 8),
+                    const Spacer(),
                     IconButton(
                       icon: Icon(_showGraph ? Icons.list : Icons.show_chart, color: Colors.white70),
                       onPressed: () => setState(() => _showGraph = !_showGraph),
                       tooltip: _showGraph ? 'Raw Data' : 'Graph',
                     ),
-                    const Spacer(),
-                    SegmentedButton<bool>(
-                      segments: const [
-                        ButtonSegment(value: true, label: Text('Angles')),
-                        ButtonSegment(value: false, label: Text('Gyro')),
-                      ],
-                      selected: {_showAngles},
-                      onSelectionChanged: (s) => setState(() => _showAngles = s.first),
-                      style: ButtonStyle(
-                        backgroundColor: WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.selected) ? Colors.teal : Colors.grey[800]),
-                        foregroundColor: WidgetStateProperty.all(Colors.white),
-                      ),
-                    ),
-                    const Spacer(),
-                    const SizedBox(width: 40),
                   ],
                 ),
                 const SizedBox(height: 4),
-                Expanded(child: _showGraph ? _buildChart() : _buildRawData()),
-                if (_showGraph) ...[const SizedBox(height: 4), _legend()],
+                Expanded(
+                  child: _showGraph ? _buildDualChart() : _buildRawData(),
+                ),
               ],
             ),
           ),
@@ -356,11 +401,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(_status, style: TextStyle(color: _isConnected ? Colors.green : Colors.grey, fontWeight: FontWeight.w500)),
+                      Text(_status, style: TextStyle(color: _isConnected ? const Color(0xFFFFD700) : Colors.grey, fontWeight: FontWeight.w500)),
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(color: Colors.teal.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(4)),
-                        child: Text(_connType, style: const TextStyle(color: Colors.teal, fontWeight: FontWeight.bold, fontSize: 12)),
+                        decoration: BoxDecoration(color: const Color(0xFFFFD700).withValues(alpha: 0.2), borderRadius: BorderRadius.circular(4)),
+                        child: Text(_connType, style: const TextStyle(color: Color(0xFFFFD700), fontWeight: FontWeight.bold, fontSize: 12)),
                       ),
                     ],
                   ),
@@ -369,7 +414,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   // Label dropdown
                   DropdownButtonFormField<String>(
                     initialValue: _label,
-                    decoration: const InputDecoration(labelText: 'Activity Label', border: OutlineInputBorder(), isDense: true),
+                    decoration: InputDecoration(
+                      labelText: 'Activity Label',
+                      labelStyle: const TextStyle(color: Color(0xFFFFD700)),
+                      border: const OutlineInputBorder(),
+                      enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: const Color(0xFFFFD700).withValues(alpha: 0.5))),
+                      focusedBorder: const OutlineInputBorder(borderSide: BorderSide(color: Color(0xFFFFD700))),
+                      isDense: true,
+                    ),
+                    style: const TextStyle(color: Color(0xFFFFD700)),
+                    dropdownColor: const Color(0xFF1A1540),
                     items: _labels.map((l) => DropdownMenuItem(value: l, child: Text(l))).toList(),
                     onChanged: _isRecording ? null : (v) => setState(() => _label = v!),
                   ),
@@ -385,7 +439,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           icon: const Icon(Icons.link),
                           label: const Text('CONNECT'),
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.teal, foregroundColor: Colors.white,
+                            backgroundColor: const Color(0xFF2196F3), foregroundColor: const Color(0xFFFFD700),
                             padding: const EdgeInsets.symmetric(vertical: 14),
                           ),
                         ),
