@@ -24,7 +24,7 @@ dependencies:
   fl_chart: ^1.1.1           # Vẽ biểu đồ (Phase sau)
 
   # --- Connectivity ---
-  # flutter_blue_plus: ^1.30.0 # (Sẽ mở comment ở Phase BLE)
+  flutter_blue_plus: ^2.0.2 # (Sẽ mở comment ở Phase BLE)
 
 dev_dependencies:
   flutter_test:
