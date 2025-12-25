@@ -26,8 +26,8 @@ typedef struct {
 } SimpleKalman_t;
 
 // --- CẤU HÌNH WIFI ---
-const char* ssid = "DnMinh";     // <--- ĐIỀN WIFI CỦA BẠN
-const char* password = "mat khau"; // <--- ĐIỀN PASS WIFI
+const char* ssid = "IoT_Automation_Lab";     // <--- ĐIỀN WIFI CỦA BẠN
+const char* password = "Edabk@408"; // <--- ĐIỀN PASS WIFI
 const char* udpAddress = "255.255.255.255"; // Broadcast cho mọi thiết bị đều nhận được
 const int udpPort = 4210;
 WiFiUDP udp;
@@ -208,10 +208,11 @@ void setup() {
   delay(50);
   Kalman_Init(&kPitch);
   Kalman_Init(&kRoll);
-  SimpleKalman_Init(&kSVM, 0.5, 0.5, 0.01);
-  SimpleKalman_Init(&kalmanGx, 0.5, 0.5, 0.01);
-  SimpleKalman_Init(&kalmanGy, 0.5, 0.5, 0.01);
-  SimpleKalman_Init(&kalmanGz, 0.5, 0.5, 0.01);
+  // SVM Kalman: lower err_measure = trust measurement more, higher q = faster response
+  SimpleKalman_Init(&kSVM, 0.1, 0.1, 0.5);  // Much more responsive
+  SimpleKalman_Init(&kalmanGx, 0.3, 0.3, 0.1);
+  SimpleKalman_Init(&kalmanGy, 0.3, 0.3, 0.1);
+  SimpleKalman_Init(&kalmanGz, 0.3, 0.3, 0.1);
   Serial.println("✅ READY");
 }
 
@@ -242,9 +243,28 @@ void loop() {
     float pitch = Kalman_GetAngle(&kPitch, pitch_raw, gy_raw, dt);
     float roll = Kalman_GetAngle(&kRoll, roll_raw, gx_raw, dt);
     
-    // Calculate Signal Vector Magnitude and smooth it
+    // Calculate Signal Vector Magnitude (SVM)
+    // SVM = total acceleration magnitude = sqrt(ax^2 + ay^2 + az^2)
+    // At rest: SVM ≈ 1g. During motion/impact: SVM changes significantly
     double svm_raw = sqrt(ax_raw*ax_raw + ay_raw*ay_raw + az_raw*az_raw);
+    
+    // Option 1: Use raw SVM directly (shows absolute acceleration)
+    // float svm = svm_raw;
+    
+    // Option 2: Use deviation from 1g (shows motion intensity)
+    // double svm_deviation = fabs(svm_raw - 1.0);
+    // float svm = SimpleKalman_Update(&kSVM, svm_deviation);
+    
+    // Option 3: Light smoothing on raw SVM (best for visualization)
     float svm = SimpleKalman_Update(&kSVM, svm_raw);
+    
+    // Debug output every 500ms
+    static unsigned long lastDebug = 0;
+    if (currentMillis - lastDebug > 500) {
+      lastDebug = currentMillis;
+      Serial.printf("DEBUG: ax=%.2f ay=%.2f az=%.2f | SVM_raw=%.3f SVM_filtered=%.3f\n", 
+                    ax_raw, ay_raw, az_raw, svm_raw, svm);
+    }
     
     // Smooth gyroscope values
     float gx = SimpleKalman_Update(&kalmanGx, gx_raw);

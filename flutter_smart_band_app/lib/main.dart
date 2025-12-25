@@ -122,11 +122,41 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _showSnack('Bluetooth not supported');
       return;
     }
-    if (await FlutterBluePlus.adapterState.first != BluetoothAdapterState.on) {
-      _showSnack('Please turn on Bluetooth');
-      return;
+    
+    // Check and request permissions
+    if (Platform.isAndroid) {
+      final permissions = [
+        Permission.bluetoothScan,
+        Permission.bluetoothConnect,
+        Permission.locationWhenInUse,
+      ];
+      
+      for (var perm in permissions) {
+        final status = await perm.request();
+        if (status.isDenied || status.isPermanentlyDenied) {
+          _showSnack('Permission ${perm.toString()} is required for BLE scanning');
+          return;
+        }
+      }
     }
-    await [Permission.bluetoothScan, Permission.bluetoothConnect, Permission.location].request();
+    
+    // Check Bluetooth adapter state
+    final adapterState = await FlutterBluePlus.adapterState.first;
+    if (adapterState != BluetoothAdapterState.on) {
+      _showSnack('Please turn on Bluetooth');
+      // Try to turn on Bluetooth
+      if (Platform.isAndroid) {
+        await FlutterBluePlus.turnOn();
+        await Future.delayed(const Duration(seconds: 1));
+        final newState = await FlutterBluePlus.adapterState.first;
+        if (newState != BluetoothAdapterState.on) {
+          return;
+        }
+      } else {
+        return;
+      }
+    }
+    
     if (!mounted) return;
     
     showDialog(
@@ -204,34 +234,53 @@ class _DashboardScreenState extends State<DashboardScreen> {
     
     final isPortrait = MediaQuery.of(context).orientation == Orientation.portrait;
     
+    // Chart 1: Pitch & Roll only (angles in degrees)
     final anglesChart = _buildSingleChart(
-      spots: [_pitchSpots, _rollSpots, _svmSpots],
+      spots: [_pitchSpots, _rollSpots],
       minY: -180.0,
       maxY: 180.0,
-      title: 'ANGLES',
-      legend: [('Pitch', Colors.redAccent), ('Roll', Colors.greenAccent), ('SVM', Colors.blueAccent)],
+      title: 'ANGLES (°)',
+      legend: [('Pitch', Colors.redAccent), ('Roll', Colors.greenAccent)],
     );
     
+    // Chart 2: SVM (acceleration magnitude in g) - separate scale!
+    final svmChart = _buildSingleChart(
+      spots: [_svmSpots],
+      minY: 0.0,
+      maxY: 3.0,  // Normal range: 0.5-2.5g when moving
+      title: 'ACCELERATION (g)',
+      legend: [('SVM', Colors.orangeAccent)],
+    );
+    
+    // Chart 3: Gyroscope (deg/s)
     final gyroChart = _buildSingleChart(
       spots: [_gxSpots, _gySpots, _gzSpots],
       minY: -500.0,
       maxY: 500.0,
-      title: 'GYROSCOPE',
+      title: 'GYROSCOPE (°/s)',
       legend: [('X', Colors.redAccent), ('Y', Colors.greenAccent), ('Z', Colors.blueAccent)],
     );
     
     if (isPortrait) {
       return Column(
         children: [
-          Expanded(child: anglesChart),
+          Expanded(flex: 2, child: anglesChart),
           const Divider(height: 1, color: Colors.white24),
-          Expanded(child: gyroChart),
+          Expanded(flex: 1, child: svmChart),
+          const Divider(height: 1, color: Colors.white24),
+          Expanded(flex: 2, child: gyroChart),
         ],
       );
     } else {
       return Row(
         children: [
-          Expanded(child: anglesChart),
+          Expanded(child: Column(
+            children: [
+              Expanded(child: anglesChart),
+              const Divider(height: 1, color: Colors.white24),
+              Expanded(child: svmChart),
+            ],
+          )),
           const VerticalDivider(width: 1, color: Colors.white24),
           Expanded(child: gyroChart),
         ],
@@ -277,11 +326,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 maxY: maxY,
                 minX: spots[0].first.x,
                 maxX: spots[0].last.x,
-                lineBarsData: [
-                  _line(spots[0], legend[0].$2),
-                  _line(spots[1], legend[1].$2),
-                  _line(spots[2], legend[2].$2),
-                ],
+                lineBarsData: spots.asMap().entries.map((e) => 
+                  _line(e.value, legend[e.key].$2)
+                ).toList(),
               ),
               duration: Duration.zero,
             ),
@@ -316,7 +363,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
           _dataSection('ANGLES', [
             _dataRow('Pitch', _data['pitch'], Colors.redAccent, '°'),
             _dataRow('Roll', _data['roll'], Colors.greenAccent, '°'),
-            _dataRow('SVM', _data['svm'], Colors.blueAccent, 'g'),
+          ]),
+          const SizedBox(height: 12),
+          _dataSection('ACCELERATION', [
+            _dataRow('SVM', _data['svm'], Colors.orangeAccent, 'g'),
           ]),
           const SizedBox(height: 12),
           _dataSection('GYROSCOPE', [
@@ -512,6 +562,7 @@ class _BleScanDialog extends StatefulWidget {
 class _BleScanDialogState extends State<_BleScanDialog> {
   List<ScanResult> _results = [];
   bool _scanning = true;
+  StreamSubscription<List<ScanResult>>? _scanSub;
 
   @override
   void initState() {
@@ -520,13 +571,55 @@ class _BleScanDialogState extends State<_BleScanDialog> {
   }
 
   Future<void> _scan() async {
-    FlutterBluePlus.scanResults.listen((r) { if (mounted) setState(() => _results = r); });
-    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 8));
+    // Clear previous results
+    _results.clear();
+    
+    // Listen to scan results
+    _scanSub?.cancel();
+    _scanSub = FlutterBluePlus.scanResults.listen((results) {
+      if (mounted) {
+        setState(() {
+          // Filter to show only devices with names (likely our ESP32)
+          _results = results.where((r) => 
+            r.device.platformName.isNotEmpty || 
+            r.advertisementData.advName.isNotEmpty
+          ).toList();
+        });
+      }
+    });
+    
+    // Also listen to on-scan-results for immediate updates
+    FlutterBluePlus.onScanResults.listen((results) {
+      if (mounted && results.isNotEmpty) {
+        setState(() {
+          for (var r in results) {
+            final idx = _results.indexWhere((e) => e.device.remoteId == r.device.remoteId);
+            if (idx >= 0) {
+              _results[idx] = r;
+            } else if (r.device.platformName.isNotEmpty || r.advertisementData.advName.isNotEmpty) {
+              _results.add(r);
+            }
+          }
+        });
+      }
+    });
+    
+    try {
+      // Start scan with Android-specific settings for better discovery
+      await FlutterBluePlus.startScan(
+        timeout: const Duration(seconds: 10),
+        androidScanMode: AndroidScanMode.lowLatency,
+      );
+    } catch (e) {
+      debugPrint('Scan error: $e');
+    }
+    
     if (mounted) setState(() => _scanning = false);
   }
 
   @override
   void dispose() {
+    _scanSub?.cancel();
     FlutterBluePlus.stopScan();
     super.dispose();
   }
@@ -547,11 +640,14 @@ class _BleScanDialogState extends State<_BleScanDialog> {
               itemCount: _results.length,
               itemBuilder: (_, i) {
                 final r = _results[i];
-                final name = r.device.platformName.isEmpty ? 'Unknown' : r.device.platformName;
+                // Try platformName first, then advertisementData.advName
+                String name = r.device.platformName;
+                if (name.isEmpty) name = r.advertisementData.advName;
+                if (name.isEmpty) name = r.device.remoteId.toString();
                 return ListTile(
                   leading: Icon(Icons.bluetooth, color: r.rssi > -70 ? Colors.blue : Colors.grey),
                   title: Text(name),
-                  subtitle: Text('${r.rssi} dBm'),
+                  subtitle: Text('${r.rssi} dBm • ${r.device.remoteId}'),
                   trailing: TextButton(child: const Text('Connect'), onPressed: () => widget.onSelect(r.device)),
                 );
               },
