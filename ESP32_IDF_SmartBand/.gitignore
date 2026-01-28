@@ -1,0 +1,9 @@
+# Ignore build artifacts
+build/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+
+# IDE files
+.vscode/
+*.code-workspace

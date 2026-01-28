@@ -1,0 +1,19 @@
+idf_component_register(
+    SRCS 
+        "main.c"
+        "mpu6050.c"
+        "kalman_filter.c"
+        "wifi_manager.c"
+        "ble_server.c"
+        "json_utils.c"
+    INCLUDE_DIRS 
+        "."
+    REQUIRES 
+        driver 
+        nvs_flash 
+        esp_wifi 
+        esp_netif 
+        lwip 
+        bt 
+        json
+)

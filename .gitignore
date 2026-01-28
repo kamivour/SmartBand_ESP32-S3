@@ -53,3 +53,10 @@ android/app/profile
 android/app/release
 
 *.code-workspace
+
+# ESP-IDF specific
+build/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components/
