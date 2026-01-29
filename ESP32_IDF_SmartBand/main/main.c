@@ -8,6 +8,7 @@
 #include "ble_server.h"
 #include "json_utils.h"
 #include "kalman_filter.h"
+#include "max30102.h"
 #include "mpu6050.h"
 #include "wifi_manager.h"
 
@@ -82,15 +83,19 @@ static void sensor_task(void *pvParameters) {
     float gy = SimpleKalman_Update(&kalmanGy, gy_raw);
     float gz = SimpleKalman_Update(&kalmanGz, gz_raw);
 
+    // Read MAX30102 heart rate and SpO2 data
+    int heart_rate = 0, spo2 = 0;
+    MAX30102_ReadData(&heart_rate, &spo2);
+
     // Battery simulation (will decrease over time)
     if (batLevel > 0)
       batLevel -= 0.001f;
 
     // Create JSON packet
     char json_buffer[JSON_BUFFER_SIZE];
-    int json_len =
-        JSON_CreateSensorPacket(json_buffer, sizeof(json_buffer), current_time,
-                                pitch, roll, svm, gx, gy, gz, (int)batLevel);
+    int json_len = JSON_CreateSensorPacket(
+        json_buffer, sizeof(json_buffer), current_time, pitch, roll, svm, gx,
+        gy, gz, heart_rate, spo2, (int)batLevel);
 
     if (json_len < 0) {
       ESP_LOGE(TAG, "Failed to create JSON packet");
@@ -139,7 +144,15 @@ void app_main(void) {
   }
   vTaskDelay(pdMS_TO_TICKS(50));
 
-  // 4. Initialize Kalman filters with tuned parameters (v0.2.2 improvements)
+  // 4. Initialize MAX30102
+  ESP_LOGI(TAG, "🔧 MAX30102...");
+  if (!MAX30102_Init()) {
+    ESP_LOGE(TAG, "❌ MAX30102 init failed!");
+    return;
+  }
+  vTaskDelay(pdMS_TO_TICKS(50));
+
+  // 5. Initialize Kalman filters with tuned parameters (v0.2.2 improvements)
   Kalman_Init(&kPitch);
   Kalman_Init(&kRoll);
   // SVM Kalman: lower err_measure = trust measurement more, higher q = faster

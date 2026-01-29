@@ -2,6 +2,7 @@ idf_component_register(
     SRCS 
         "main.c"
         "mpu6050.c"
+        "max30102.c"
         "kalman_filter.c"
         "wifi_manager.c"
         "ble_server.c"

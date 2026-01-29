@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
+import 'dart:math';
+import 'package:universal_io/io.dart';
 
+import 'package:flutter/foundation.dart';
 import 'package:csv/csv.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
@@ -45,9 +47,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _isConnected = false;
   String _connType = 'NONE';
   String _status = 'Disconnected';
+  Timer? _simTimer;
 
   // Data
-  Map<String, dynamic> _data = {'ts': 0, 'bat': 0, 'pitch': 0.0, 'roll': 0.0, 'svm': 0.0, 'gx': 0.0, 'gy': 0.0, 'gz': 0.0};
+  Map<String, dynamic> _data = {
+    'ts': 0, 'bat': 0, 
+    'pitch': 0.0, 'roll': 0.0, 'svm': 0.0, 
+    'gx': 0.0, 'gy': 0.0, 'gz': 0.0,
+    'hr': 0, 'spo2': 0,
+  };
   
   // Chart data
   final List<FlSpot> _pitchSpots = [], _rollSpots = [], _svmSpots = [];
@@ -91,7 +99,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _buffer.add(SensorData(
           timestamp: d['ts'], pitch: d['pitch'].toDouble(), roll: d['roll'].toDouble(),
           svm: d['svm'].toDouble(), gx: d['gx'].toDouble(), gy: d['gy'].toDouble(), 
-          gz: d['gz'].toDouble(), label: _label,
+          gz: d['gz'].toDouble(), 
+          hr: (d['hr'] ?? 0).toInt(), spo2: (d['spo2'] ?? 0).toInt(),
+          label: _label,
         ));
       }
       
@@ -172,11 +182,30 @@ class _DashboardScreenState extends State<DashboardScreen> {
     await _disconnect();
     setState(() => _status = 'Connecting...');
     try {
-      await dev.connect(license: License.free);
+      // Add timeout and autoConnect false to reduce error 133
+      await dev.connect(
+        license: License.free,
+        timeout: const Duration(seconds: 15),
+        autoConnect: false,
+      );
       _bleDevice = dev;
-      if (Platform.isAndroid) await dev.requestMtu(512);
       
-      for (var svc in await dev.discoverServices()) {
+      // Small delay before requesting MTU
+      await Future.delayed(const Duration(milliseconds: 300));
+      if (Platform.isAndroid) {
+        try {
+          await dev.requestMtu(512);
+        } catch (e) {
+          // MTU request can fail, but not critical
+          debugPrint('MTU request failed: $e');
+        }
+      }
+      
+      // Discover services with delay
+      await Future.delayed(const Duration(milliseconds: 300));
+      final services = await dev.discoverServices();
+      
+      for (var svc in services) {
         for (var chr in svc.characteristics) {
           if (chr.properties.notify) {
             await chr.setNotifyValue(true);
@@ -190,14 +219,45 @@ class _DashboardScreenState extends State<DashboardScreen> {
       await dev.disconnect();
     } catch (e) {
       setState(() => _status = 'BLE Error: $e');
+      // Clean up on error
+      try {
+        await dev.disconnect();
+      } catch (_) {}
     }
   }
 
   Future<void> _disconnect() async {
+    _simTimer?.cancel(); _simTimer = null;
     _udpSocket?.close(); _udpSocket = null;
     _bleSub?.cancel(); _bleSub = null;
-    await _bleDevice?.disconnect(); _bleDevice = null;
+    if (_bleDevice != null) {
+      try { await _bleDevice?.disconnect(); } catch (_) {}
+      _bleDevice = null;
+    }
     if (mounted) setState(() { _isConnected = false; _connType = 'NONE'; _status = 'Disconnected'; });
+  }
+
+  // Simulation
+  void _startSimulation() async {
+    await _disconnect();
+    setState(() { _isConnected = true; _connType = 'SIM'; _status = 'Simulating Data...'; });
+    _simTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final t = now / 1000.0;
+      final d = {
+        'ts': now,
+        'bat': 85 + (5 * sin(t * 0.1)).toInt(),
+        'pitch': 30 * sin(t * 2),
+        'roll': 30 * cos(t * 2),
+        'svm': 1.0 + 0.5 * sin(t * 5),
+        'gx': 100 * sin(t * 3),
+        'gy': 100 * cos(t * 3),
+        'gz': 50 * sin(t * 1),
+        'hr': 75 + (15 * sin(t * 0.5)).toInt(), // 60-90 bpm
+        'spo2': 96 + (3 * sin(t * 0.2)).toInt(), // 93-99 %
+      };
+      _onData(jsonEncode(d));
+    });
   }
 
   // Recording
@@ -214,7 +274,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Future<void> _saveCsv() async {
     if (_buffer.isEmpty) return;
     try {
-      final rows = [['timestamp', 'pitch', 'roll', 'svm', 'gx', 'gy', 'gz', 'label'], ..._buffer.map((d) => d.toCsvRow())];
+      if (kIsWeb) {
+        _showSnack('File saving unavailable in Web Demo');
+        return;
+      }
+      final rows = [['timestamp', 'pitch', 'roll', 'svm', 'gx', 'gy', 'gz', 'hr', 'spo2', 'label'], ..._buffer.map((d) => d.toCsvRow())];
       final csv = const ListToCsvConverter().convert(rows);
       final dir = await getExternalStorageDirectory();
       final path = '${dir!.path}/data_${DateTime.now().millisecondsSinceEpoch}.csv';
@@ -227,6 +291,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   void _showSnack(String msg) {
     if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Widget _statChip(IconData icon, String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.2),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(children: [
+        Icon(icon, size: 14, color: color),
+        const SizedBox(width: 4),
+        Text(label, style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 12)),
+      ]),
+    );
   }
 
   Widget _buildDualChart() {
@@ -374,6 +453,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
             _dataRow('Y', _data['gy'], Colors.greenAccent, '°/s'),
             _dataRow('Z', _data['gz'], Colors.blueAccent, '°/s'),
           ]),
+          const SizedBox(height: 12),
+          _dataSection('HEALTHq', [
+            _dataRow('Heart Rate', _data['hr'], Colors.red, 'bpm'),
+            _dataRow('SpO2', _data['spo2'], Colors.blue, '%'),
+          ]),
         ],
       ),
     );
@@ -423,8 +507,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         color: Colors.teal.withValues(alpha: 0.3),
                         borderRadius: BorderRadius.circular(4),
                       ),
-                      child: Text('${_data['bat']}%', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
+                      child: Row(children: [
+                        const Icon(Icons.battery_std, size: 14, color: Colors.greenAccent),
+                        const SizedBox(width: 4),
+                        Text('${_data['bat']}%', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
+                      ]),
                     ),
+                    const SizedBox(width: 8),
+                    // Heart Rate & SpO2
+                    if (_data.containsKey('hr')) ...[
+                      _statChip(Icons.favorite, '${_data['hr']}', Colors.red),
+                      const SizedBox(width: 8),
+                      _statChip(Icons.water_drop, '${_data['spo2']}%', Colors.blue),
+                    ],
                     const Spacer(),
                     IconButton(
                       icon: Icon(_showGraph ? Icons.list : Icons.show_chart, color: Colors.white70),
@@ -533,6 +628,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       builder: (ctx) => SimpleDialog(
         title: const Text('Connect'),
         children: [
+          ListTile(
+            leading: const Icon(Icons.computer, color: Colors.purple),
+            title: const Text('Simulation (Web/Test)'),
+            subtitle: const Text('Random data'),
+            onTap: () { Navigator.pop(ctx); _startSimulation(); },
+          ),
           ListTile(
             leading: const Icon(Icons.wifi, color: Colors.blue),
             title: const Text('WiFi (UDP)'),

@@ -25,6 +25,7 @@ dependencies:
 
   # --- Connectivity ---
   flutter_blue_plus: ^2.0.2 # (Sẽ mở comment ở Phase BLE)
+  universal_io: ^2.3.1
 
 dev_dependencies:
   flutter_test:
