@@ -45,39 +45,42 @@ static uint32_t last_peak_time = 0;
 static int peak_count = 0;
 
 // Write to MAX30102 register
-static bool max30102_write_reg(uint8_t reg, uint8_t value) {
+static esp_err_t max30102_write_reg(uint8_t reg, uint8_t value) {
   uint8_t write_buf[2] = {reg, value};
   return i2c_master_write_to_device(I2C_NUM_0, MAX30102_ADDR, write_buf, 2,
-                                    1000 / portTICK_PERIOD_MS) == ESP_OK;
+                                    1000 / portTICK_PERIOD_MS);
 }
 
 // Read from MAX30102 register
-static bool max30102_read_reg(uint8_t reg, uint8_t *data, size_t len) {
+static esp_err_t max30102_read_reg(uint8_t reg, uint8_t *data, size_t len) {
   return i2c_master_write_read_device(I2C_NUM_0, MAX30102_ADDR, &reg, 1, data,
-                                      len, 1000 / portTICK_PERIOD_MS) == ESP_OK;
+                                      len, 1000 / portTICK_PERIOD_MS);
 }
 
-bool MAX30102_Init(void) {
+esp_err_t MAX30102_Init(void) {
   ESP_LOGI(TAG, "Initializing MAX30102...");
+  esp_err_t ret;
 
   // Check Part ID
   uint8_t part_id;
-  if (!max30102_read_reg(REG_PART_ID, &part_id, 1)) {
+  ret = max30102_read_reg(REG_PART_ID, &part_id, 1);
+  if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to read Part ID");
-    return false;
+    return ret;
   }
 
   if (part_id != 0x15) {
     ESP_LOGE(TAG, "Invalid Part ID: 0x%02X (expected 0x15)", part_id);
-    return false;
+    return ESP_FAIL;
   }
 
   // Reset
   max30102_write_reg(REG_MODE_CONFIG, 0x40);
   vTaskDelay(pdMS_TO_TICKS(100));
 
-  // Configure FIFO: Sample averaging = 4, FIFO rollover = enabled
-  max30102_write_reg(REG_FIFO_CONFIG, 0x4F);
+  // Configure FIFO: Sample averaging = 1 (raw), FIFO rollover = enabled,
+  // almost_full = 15 0x5F = 01011111 (matches working reference implementation)
+  max30102_write_reg(REG_FIFO_CONFIG, 0x5F);
 
   // Mode: SpO2 mode (RED and IR LEDs)
   max30102_write_reg(REG_MODE_CONFIG, 0x03);
@@ -96,8 +99,8 @@ bool MAX30102_Init(void) {
   max30102_write_reg(REG_FIFO_RD_PTR, 0x00);
   max30102_write_reg(REG_OVERFLOW_CTR, 0x00);
 
-  ESP_LOGI(TAG, "✅ MAX30102 initialized");
-  return true;
+  ESP_LOGI(TAG, "✅ MAX30102 initialized in SpO2 Mode");
+  return ESP_OK;
 }
 
 // Simple heart rate calculation using peak detection
@@ -196,32 +199,51 @@ static int calculate_spo2(void) {
   return spo2;
 }
 
-bool MAX30102_ReadData(int *heart_rate, int *spo2) {
-  // Read number of available samples
+// NEW: Read raw Red and IR values (for debugging)
+esp_err_t MAX30102_ReadRawData(uint32_t *red, uint32_t *ir) {
   uint8_t wr_ptr, rd_ptr;
-  max30102_read_reg(REG_FIFO_WR_PTR, &wr_ptr, 1);
-  max30102_read_reg(REG_FIFO_RD_PTR, &rd_ptr, 1);
+  esp_err_t ret;
 
-  int num_available = (wr_ptr - rd_ptr) & 0x1F; // 32 sample FIFO
+  // CRITICAL FIX: Check FIFO pointers before reading
+  ret = max30102_read_reg(REG_FIFO_WR_PTR, &wr_ptr, 1);
+  if (ret != ESP_OK)
+    return ret;
 
-  if (num_available > 0) {
-    // Read one sample (6 bytes: 3 bytes RED + 3 bytes IR)
-    uint8_t fifo_data[6];
-    if (!max30102_read_reg(REG_FIFO_DATA, fifo_data, 6)) {
-      return false;
-    }
+  ret = max30102_read_reg(REG_FIFO_RD_PTR, &rd_ptr, 1);
+  if (ret != ESP_OK)
+    return ret;
 
-    // Parse RED and IR values (18-bit)
-    uint32_t red = ((uint32_t)fifo_data[0] << 16) |
-                   ((uint32_t)fifo_data[1] << 8) | fifo_data[2];
-    uint32_t ir = ((uint32_t)fifo_data[3] << 16) |
-                  ((uint32_t)fifo_data[4] << 8) | fifo_data[5];
+  // Check if FIFO has data
+  if (wr_ptr == rd_ptr) {
+    return ESP_FAIL; // FIFO Empty - no new data
+  }
 
-    // Mask to 18 bits
-    red &= 0x3FFFF;
-    ir &= 0x3FFFF;
+  // Read 6 bytes from FIFO (3 Red + 3 IR)
+  uint8_t fifo_data[6];
+  ret = max30102_read_reg(REG_FIFO_DATA, fifo_data, 6);
+  if (ret != ESP_OK) {
+    return ret;
+  }
 
-    // Store in circular buffer
+  // Parse RED and IR values (18-bit)
+  *red = ((uint32_t)fifo_data[0] << 16) | ((uint32_t)fifo_data[1] << 8) |
+         fifo_data[2];
+  *ir = ((uint32_t)fifo_data[3] << 16) | ((uint32_t)fifo_data[4] << 8) |
+        fifo_data[5];
+
+  // Mask to 18 bits
+  *red &= 0x3FFFF;
+  *ir &= 0x3FFFF;
+
+  return ESP_OK;
+}
+
+esp_err_t MAX30102_ReadData(int *heart_rate, int *spo2) {
+  uint32_t red = 0, ir = 0;
+  esp_err_t ret = MAX30102_ReadRawData(&red, &ir);
+
+  if (ret == ESP_OK) {
+    // Store in circular buffer for HR/SpO2 calculation
     red_buffer[buffer_idx] = red;
     ir_buffer[buffer_idx] = ir;
     buffer_idx = (buffer_idx + 1) % BUFFER_SIZE;
@@ -229,16 +251,19 @@ bool MAX30102_ReadData(int *heart_rate, int *spo2) {
     if (buffer_idx == 0) {
       buffer_filled = true;
     }
-  }
 
-  // Calculate HR and SpO2 if buffer is filled
-  if (buffer_filled) {
-    *heart_rate = calculate_heart_rate();
-    *spo2 = calculate_spo2();
+    // Calculate HR and SpO2 if buffer is filled
+    if (buffer_filled) {
+      *heart_rate = calculate_heart_rate();
+      *spo2 = calculate_spo2();
+    } else {
+      *heart_rate = 0;
+      *spo2 = 0;
+    }
   } else {
     *heart_rate = 0;
     *spo2 = 0;
   }
 
-  return true;
+  return ret;
 }
