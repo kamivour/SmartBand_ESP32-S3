@@ -6,12 +6,19 @@
 #include <stdint.h>
 
 
-// WiFi Credentials (hardcoded as requested)
-#define WIFI_SSID "DnMinh"
-#define WIFI_PASS "mat khau"
+// WiFi Access Point Configuration
+#define WIFI_AP_SSID "ESP32_SmartBand"
+#define WIFI_AP_PASS "smartband123"
+#define WIFI_AP_CHANNEL 1
+#define WIFI_AP_MAX_CONNECTIONS 4
+
+// AP Network Configuration
+#define AP_IP_ADDR "192.168.4.1"
+#define AP_GATEWAY "192.168.4.1"
+#define AP_NETMASK "255.255.255.0"
 
 // UDP Configuration
-#define UDP_BROADCAST_ADDR "255.255.255.255"
+#define UDP_BROADCAST_ADDR "192.168.4.255"  // AP subnet broadcast
 #define UDP_PORT 4210
 
 /**

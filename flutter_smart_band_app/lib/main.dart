@@ -40,6 +40,11 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
+  // ESP32 BLE Configuration (from ESP-IDF NimBLE)
+  static const String _esp32DeviceName = 'ESP32 SmartBand';
+  static const String _serviceUuid = '4fafc201-1fb5-459e-8fcc-c5c9c333914b';
+  static const String _characteristicUuid = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
+  
   // Connection
   RawDatagramSocket? _udpSocket;
   BluetoothDevice? _bleDevice;
@@ -126,6 +131,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
+  // Check if location services are enabled (required for BLE on Android)
+  Future<bool> _checkLocationEnabled() async {
+    final status = await Permission.locationWhenInUse.serviceStatus;
+    return status.isEnabled;
+  }
+
+  // Helper to compare UUIDs (handles different formats)
+  bool _uuidMatches(dynamic uuid, String targetUuid) {
+    final uuidStr = uuid.toString().toLowerCase().replaceAll('-', '');
+    final targetStr = targetUuid.toLowerCase().replaceAll('-', '');
+    return uuidStr == targetStr;
+  }
+
   // BLE
   Future<void> _startBleScan() async {
     if (!await FlutterBluePlus.isSupported) {
@@ -145,8 +163,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
         final status = await perm.request();
         if (status.isDenied || status.isPermanentlyDenied) {
           _showSnack('Permission ${perm.toString()} is required for BLE scanning');
+          debugPrint('❌ Permission denied: ${perm.toString()}');
           return;
         }
+      }
+      
+      // Check if location services are enabled
+      if (!await _checkLocationEnabled()) {
+        _showSnack('Please enable Location services in Settings');
+        debugPrint('❌ Location services disabled');
+        return;
       }
     }
     
@@ -154,12 +180,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final adapterState = await FlutterBluePlus.adapterState.first;
     if (adapterState != BluetoothAdapterState.on) {
       _showSnack('Please turn on Bluetooth');
+      debugPrint('❌ Bluetooth adapter state: $adapterState');
       // Try to turn on Bluetooth
       if (Platform.isAndroid) {
-        await FlutterBluePlus.turnOn();
-        await Future.delayed(const Duration(seconds: 1));
-        final newState = await FlutterBluePlus.adapterState.first;
-        if (newState != BluetoothAdapterState.on) {
+        try {
+          await FlutterBluePlus.turnOn();
+          await Future.delayed(const Duration(seconds: 1));
+          final newState = await FlutterBluePlus.adapterState.first;
+          if (newState != BluetoothAdapterState.on) {
+            debugPrint('❌ Failed to turn on Bluetooth');
+            return;
+          }
+          debugPrint('✅ Bluetooth turned on');
+        } catch (e) {
+          debugPrint('❌ Error turning on Bluetooth: $e');
           return;
         }
       } else {
@@ -169,57 +203,183 @@ class _DashboardScreenState extends State<DashboardScreen> {
     
     if (!mounted) return;
     
+    debugPrint('🔍 Starting BLE scan for: $_esp32DeviceName');
     showDialog(
       context: context,
-      builder: (ctx) => _BleScanDialog(onSelect: (dev) {
-        Navigator.pop(ctx);
-        _connectBle(dev);
-      }),
+      builder: (ctx) => _BleScanDialog(
+        targetDeviceName: _esp32DeviceName,
+        onSelect: (dev) {
+          Navigator.pop(ctx);
+          _connectBle(dev);
+        },
+      ),
     );
   }
 
   Future<void> _connectBle(BluetoothDevice dev) async {
     await _disconnect();
     setState(() => _status = 'Connecting...');
+    
+    StreamSubscription<BluetoothConnectionState>? stateSub;
+    
     try {
-      // Add timeout and autoConnect false to reduce error 133
+      // Listen to connection state to detect disconnections
+      stateSub = dev.connectionState.listen((state) {
+        debugPrint('📶 Connection state: $state');
+        if (state == BluetoothConnectionState.disconnected && _isConnected) {
+          debugPrint('❌ Device disconnected unexpectedly');
+          _disconnect();
+        }
+      });
+      
+      // Connect with longer timeout
+      debugPrint('🔌 Connecting to ${dev.platformName}...');
       await dev.connect(
         license: License.free,
-        timeout: const Duration(seconds: 15),
+        timeout: const Duration(seconds: 30),
         autoConnect: false,
       );
       _bleDevice = dev;
+      debugPrint('✅ Connected!');
       
       // Small delay before requesting MTU
-      await Future.delayed(const Duration(milliseconds: 300));
+      await Future.delayed(const Duration(milliseconds: 500));
       if (Platform.isAndroid) {
         try {
-          await dev.requestMtu(512);
+          final mtu = await dev.requestMtu(512);
+          debugPrint('📏 MTU set to: $mtu');
         } catch (e) {
-          // MTU request can fail, but not critical
-          debugPrint('MTU request failed: $e');
+          debugPrint('⚠️ MTU request failed: $e (non-critical)');
         }
       }
       
-      // Discover services with delay
-      await Future.delayed(const Duration(milliseconds: 300));
+      // Discover services with longer delay
+      debugPrint('🔍 Discovering services...');
+      await Future.delayed(const Duration(milliseconds: 800));
       final services = await dev.discoverServices();
+      debugPrint('📡 Discovered ${services.length} services');
       
+      // Look for our specific service UUID
+      BluetoothService? targetService;
       for (var svc in services) {
-        for (var chr in svc.characteristics) {
-          if (chr.properties.notify) {
-            await chr.setNotifyValue(true);
-            _bleSub = chr.lastValueStream.listen((v) => _onData(utf8.decode(v)));
-            setState(() { _isConnected = true; _connType = 'BLE'; _status = 'BLE: ${dev.platformName}'; });
-            return;
+        debugPrint('  Service: ${svc.uuid}');
+        if (_uuidMatches(svc.uuid, _serviceUuid)) {
+          targetService = svc;
+          debugPrint('✅ Found target service!');
+          break;
+        }
+      }
+      
+      if (targetService == null) {
+        final allServices = services.map((s) => s.uuid.toString()).join('\n');
+        setState(() => _status = 'Service not found\nFound: ${services.length} services\nTap to see details');
+        debugPrint('❌ Target service $_serviceUuid not found');
+        debugPrint('Available services:');
+        for (var svc in services) {
+          debugPrint('  - ${svc.uuid}');
+          for (var chr in svc.characteristics) {
+            debugPrint('    - Char: ${chr.uuid}');
           }
         }
+        
+        // Show dialog with all found services
+        if (mounted) {
+          showDialog(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text('Service Not Found'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Looking for:\n$_serviceUuid\n', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
+                    Text('Found ${services.length} services:\n', style: const TextStyle(fontWeight: FontWeight.bold)),
+                    ...services.map((svc) => Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Service: ${svc.uuid}', style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+                          ...svc.characteristics.map((chr) => Text('  Char: ${chr.uuid}', style: const TextStyle(fontSize: 10, color: Colors.grey))),
+                        ],
+                      ),
+                    )),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
+              ],
+            ),
+          );
+        }
+        
+        stateSub?.cancel();
+        await dev.disconnect();
+        return;
       }
-      setState(() => _status = 'No notify characteristic');
-      await dev.disconnect();
+      
+      // Look for our specific characteristic UUID
+      BluetoothCharacteristic? targetChar;
+      for (var chr in targetService.characteristics) {
+        debugPrint('  Characteristic: ${chr.uuid} - Notify: ${chr.properties.notify}');
+        if (_uuidMatches(chr.uuid, _characteristicUuid)) {
+          targetChar = chr;
+          debugPrint('✅ Found target characteristic!');
+          break;
+        }
+      }
+      
+      if (targetChar == null) {
+        setState(() => _status = 'Characteristic not found');
+        debugPrint('❌ Target characteristic $_characteristicUuid not found');
+        debugPrint('Available characteristics:');
+        for (var chr in targetService.characteristics) {
+          debugPrint('  - ${chr.uuid}');
+        }
+        stateSub?.cancel();
+        await dev.disconnect();
+        return;
+      }
+      
+      if (!targetChar.properties.notify) {
+        setState(() => _status = 'No notify support');
+        debugPrint('❌ Characteristic does not support notify');
+        stateSub?.cancel();
+        await dev.disconnect();
+        return;
+      }
+      
+      // Subscribe to notifications
+      debugPrint('📲 Subscribing to notifications...');
+      await targetChar.setNotifyValue(true);
+      debugPrint('✅ Notifications enabled');
+      
+      _bleSub = targetChar.lastValueStream.listen(
+        (v) {
+          final data = utf8.decode(v);
+          debugPrint('📥 BLE data: $data');
+          _onData(data);
+        },
+        onError: (error) {
+          debugPrint('❌ BLE data stream error: $error');
+          _disconnect();
+        },
+      );
+      
+      setState(() { 
+        _isConnected = true; 
+        _connType = 'BLE'; 
+        _status = 'BLE: ${dev.platformName}'; 
+      });
+      debugPrint('✅ BLE connected and subscribed');
+      return;
     } catch (e) {
       setState(() => _status = 'BLE Error: $e');
+      debugPrint('❌ Connection error: $e');
       // Clean up on error
+      stateSub?.cancel();
       try {
         await dev.disconnect();
       } catch (_) {}
@@ -542,11 +702,24 @@ class _DashboardScreenState extends State<DashboardScreen> {
               padding: const EdgeInsets.all(16),
               child: Column(
                 children: [
-                  // Status
+                  // Status - with text wrapping
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(_status, style: TextStyle(color: _isConnected ? const Color(0xFFFFD700) : Colors.grey, fontWeight: FontWeight.w500)),
+                      Expanded(
+                        child: Text(
+                          _status, 
+                          style: TextStyle(
+                            color: _isConnected ? const Color(0xFFFFD700) : Colors.grey, 
+                            fontWeight: FontWeight.w500,
+                            fontSize: 13,
+                          ),
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                         decoration: BoxDecoration(color: const Color(0xFFFFD700).withValues(alpha: 0.2), borderRadius: BorderRadius.circular(4)),
@@ -654,7 +827,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
 class _BleScanDialog extends StatefulWidget {
   final void Function(BluetoothDevice) onSelect;
-  const _BleScanDialog({required this.onSelect});
+  final String targetDeviceName;
+  const _BleScanDialog({required this.onSelect, required this.targetDeviceName});
 
   @override
   State<_BleScanDialog> createState() => _BleScanDialogState();
@@ -675,6 +849,8 @@ class _BleScanDialogState extends State<_BleScanDialog> {
     // Clear previous results
     _results.clear();
     
+    debugPrint('🔍 BLE Scan started...');
+    
     // Listen to scan results
     _scanSub?.cancel();
     _scanSub = FlutterBluePlus.scanResults.listen((results) {
@@ -685,6 +861,15 @@ class _BleScanDialogState extends State<_BleScanDialog> {
             r.device.platformName.isNotEmpty || 
             r.advertisementData.advName.isNotEmpty
           ).toList();
+          
+          // Log each device found
+          for (var r in _results) {
+            final name = r.device.platformName.isNotEmpty ? r.device.platformName : r.advertisementData.advName;
+            debugPrint('  Device: $name | RSSI: ${r.rssi} | ID: ${r.device.remoteId}');
+            if (name == widget.targetDeviceName) {
+              debugPrint('  ✅ FOUND TARGET DEVICE!');
+            }
+          }
         });
       }
     });
@@ -707,12 +892,14 @@ class _BleScanDialogState extends State<_BleScanDialog> {
     
     try {
       // Start scan with Android-specific settings for better discovery
+      // NO service UUID filters - NimBLE doesn't include UUIDs in advertising packet
       await FlutterBluePlus.startScan(
-        timeout: const Duration(seconds: 10),
+        timeout: const Duration(seconds: 15),
         androidScanMode: AndroidScanMode.lowLatency,
       );
+      debugPrint('📡 BLE Scan running (15s timeout, low latency mode)');
     } catch (e) {
-      debugPrint('Scan error: $e');
+      debugPrint('❌ Scan error: $e');
     }
     
     if (mounted) setState(() => _scanning = false);
@@ -727,16 +914,36 @@ class _BleScanDialogState extends State<_BleScanDialog> {
 
   @override
   Widget build(BuildContext context) {
+    // Sort results: target device first
+    _results.sort((a, b) {
+      final aName = a.device.platformName.isNotEmpty ? a.device.platformName : a.advertisementData.advName;
+      final bName = b.device.platformName.isNotEmpty ? b.device.platformName : b.advertisementData.advName;
+      if (aName == widget.targetDeviceName) return -1;
+      if (bName == widget.targetDeviceName) return 1;
+      return b.rssi.compareTo(a.rssi); // Sort by signal strength
+    });
+    
     return AlertDialog(
       title: Row(children: [
         if (_scanning) const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
         if (_scanning) const SizedBox(width: 8),
         Text(_scanning ? 'Scanning...' : 'Devices'),
+        const Spacer(),
+        Text('Looking for: ${widget.targetDeviceName}', style: const TextStyle(fontSize: 10, color: Colors.grey)),
       ]),
       content: SizedBox(
         width: 300, height: 250,
         child: _results.isEmpty
-          ? Center(child: _scanning ? const CircularProgressIndicator() : const Text('No devices found'))
+          ? Center(child: _scanning 
+            ? Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const CircularProgressIndicator(),
+                  const SizedBox(height: 16),
+                  Text('Searching for ${widget.targetDeviceName}...', style: const TextStyle(fontSize: 12)),
+                ],
+              )
+            : const Text('No devices found'))
           : ListView.builder(
               itemCount: _results.length,
               itemBuilder: (_, i) {
@@ -745,11 +952,33 @@ class _BleScanDialogState extends State<_BleScanDialog> {
                 String name = r.device.platformName;
                 if (name.isEmpty) name = r.advertisementData.advName;
                 if (name.isEmpty) name = r.device.remoteId.toString();
-                return ListTile(
-                  leading: Icon(Icons.bluetooth, color: r.rssi > -70 ? Colors.blue : Colors.grey),
-                  title: Text(name),
-                  subtitle: Text('${r.rssi} dBm • ${r.device.remoteId}'),
-                  trailing: TextButton(child: const Text('Connect'), onPressed: () => widget.onSelect(r.device)),
+                
+                final isTargetDevice = name == widget.targetDeviceName;
+                
+                return Container(
+                  decoration: isTargetDevice ? BoxDecoration(
+                    color: Colors.green.withValues(alpha: 0.2),
+                    border: Border.all(color: Colors.green, width: 2),
+                    borderRadius: BorderRadius.circular(8),
+                  ) : null,
+                  margin: const EdgeInsets.symmetric(vertical: 2),
+                  child: ListTile(
+                    leading: Icon(
+                      isTargetDevice ? Icons.bluetooth_connected : Icons.bluetooth,
+                      color: isTargetDevice ? Colors.green : (r.rssi > -70 ? Colors.blue : Colors.grey),
+                    ),
+                    title: Row(
+                      children: [
+                        Expanded(child: Text(name, style: TextStyle(fontWeight: isTargetDevice ? FontWeight.bold : FontWeight.normal))),
+                        if (isTargetDevice) const Icon(Icons.check_circle, color: Colors.green, size: 16),
+                      ],
+                    ),
+                    subtitle: Text('${r.rssi} dBm • ${r.device.remoteId}'),
+                    trailing: TextButton(
+                      child: const Text('Connect'), 
+                      onPressed: () => widget.onSelect(r.device),
+                    ),
+                  ),
                 );
               },
             ),

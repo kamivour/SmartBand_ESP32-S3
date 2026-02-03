@@ -3,28 +3,28 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "nvs_flash.h"
 #include "lwip/sockets.h"
 #include <string.h>
 
 static const char *TAG = "WiFi";
-static bool s_wifi_connected = false;
+static bool s_wifi_ready = false;
 static esp_netif_t *s_netif = NULL;
 static int s_udp_socket = -1;
 
-// Event handler for WiFi events
+// Event handler for WiFi AP events
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        s_wifi_connected = false;
-        ESP_LOGW(TAG, "⚠️ WiFi disconnected, attempting reconnect...");
-        esp_wifi_connect();
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "✅ WiFi OK | IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        s_wifi_connected = true;
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_event_ap_staconnected_t* event = (wifi_event_ap_staconnected_t*) event_data;
+        ESP_LOGI(TAG, "📱 Client connected: " MACSTR, MAC2STR(event->mac));
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+        wifi_event_ap_stadisconnected_t* event = (wifi_event_ap_stadisconnected_t*) event_data;
+        ESP_LOGI(TAG, "📱 Client disconnected: " MACSTR, MAC2STR(event->mac));
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START) {
+        ESP_LOGI(TAG, "✅ WiFi AP Started | SSID: %s | IP: %s", WIFI_AP_SSID, AP_IP_ADDR);
+        s_wifi_ready = true;
     }
 }
 
@@ -40,7 +40,19 @@ void WiFi_Init(void) {
     // Initialize network interface
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    s_netif = esp_netif_create_default_wifi_sta();
+    
+    // Create AP network interface
+    s_netif = esp_netif_create_default_wifi_ap();
+    
+    // Configure static IP for AP
+    esp_netif_dhcps_stop(s_netif);
+    esp_netif_ip_info_t ip_info;
+    memset(&ip_info, 0, sizeof(ip_info));
+    ip_info.ip.addr = ipaddr_addr(AP_IP_ADDR);
+    ip_info.gw.addr = ipaddr_addr(AP_GATEWAY);
+    ip_info.netmask.addr = ipaddr_addr(AP_NETMASK);
+    ESP_ERROR_CHECK(esp_netif_set_ip_info(s_netif, &ip_info));
+    ESP_ERROR_CHECK(esp_netif_dhcps_start(s_netif));
     
     // Initialize WiFi
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -49,23 +61,32 @@ void WiFi_Init(void) {
     // Register event handlers
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, 
                                                &wifi_event_handler, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, 
-                                               &wifi_event_handler, NULL));
     
-    // Configure WiFi
+    // Configure WiFi Access Point
     wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASS,
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        .ap = {
+            .ssid = WIFI_AP_SSID,
+            .ssid_len = strlen(WIFI_AP_SSID),
+            .channel = WIFI_AP_CHANNEL,
+            .password = WIFI_AP_PASS,
+            .max_connection = WIFI_AP_MAX_CONNECTIONS,
+            .authmode = WIFI_AUTH_WPA2_PSK,
+            .pmf_cfg = {
+                .required = false,
+            },
         },
     };
     
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    // If no password, use open AP
+    if (strlen(WIFI_AP_PASS) == 0) {
+        wifi_config.ap.authmode = WIFI_AUTH_OPEN;
+    }
+    
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
     
-    ESP_LOGI(TAG, "Connecting to WiFi: %s", WIFI_SSID);
+    ESP_LOGI(TAG, "Starting WiFi AP: SSID=%s, Password=%s", WIFI_AP_SSID, WIFI_AP_PASS);
     
     // Create UDP socket for broadcasting
     s_udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -81,21 +102,21 @@ void WiFi_Init(void) {
 }
 
 bool WiFi_IsConnected(void) {
-    return s_wifi_connected;
+    return s_wifi_ready;
 }
 
 void WiFi_GetIPString(char *buffer, size_t buffer_size) {
-    if (s_netif && s_wifi_connected) {
+    if (s_netif && s_wifi_ready) {
         esp_netif_ip_info_t ip_info;
         esp_netif_get_ip_info(s_netif, &ip_info);
         snprintf(buffer, buffer_size, IPSTR, IP2STR(&ip_info.ip));
     } else {
-        snprintf(buffer, buffer_size, "Not connected");
+        snprintf(buffer, buffer_size, "AP not started");
     }
 }
 
 bool UDP_SendBroadcast(const char *data, size_t len) {
-    if (!s_wifi_connected || s_udp_socket < 0) {
+    if (!s_wifi_ready || s_udp_socket < 0) {
         return false;
     }
     

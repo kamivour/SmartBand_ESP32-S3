@@ -85,21 +85,22 @@ static void sensor_task(void *pvParameters) {
 
     // Read MAX30102 heart rate and SpO2 data
     int heart_rate = 0, spo2 = 0;
-    uint32_t red_raw = 0, ir_raw = 0;
-
-    // First try to read raw data for debugging
-    esp_err_t max_ret = MAX30102_ReadRawData(&red_raw, &ir_raw);
+    
+    // Read and calculate HR/SpO2 (internally reads raw data and processes it)
+    esp_err_t max_ret = MAX30102_ReadData(&heart_rate, &spo2);
+    
+    // Debug: Log HR/SpO2 values every 500ms
     if (max_ret == ESP_OK) {
-      // Debug: Log raw values every 500ms to verify sensor is working
       static uint32_t last_max_debug = 0;
       if (current_time - last_max_debug > 500) {
         last_max_debug = current_time;
-        ESP_LOGI(TAG, "MAX30102 RAW: Red=%u, IR=%u", red_raw, ir_raw);
+        if (heart_rate > 0 || spo2 > 0) {
+          ESP_LOGI(TAG, "MAX30102: HR=%d BPM, SpO2=%d%%", heart_rate, spo2);
+        } else {
+          ESP_LOGI(TAG, "MAX30102: Filling buffer... (need 100 samples)");
+        }
       }
     }
-
-    // Then read processed HR/SpO2 (uses same raw data internally)
-    MAX30102_ReadData(&heart_rate, &spo2);
 
     // Battery simulation (will decrease over time)
     if (batLevel > 0)

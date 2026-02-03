@@ -39,10 +39,7 @@ static uint32_t red_buffer[BUFFER_SIZE];
 static int buffer_idx = 0;
 static bool buffer_filled = false;
 
-// Simple peak detection state
-static uint32_t last_peak_value = 0;
-static uint32_t last_peak_time = 0;
-static int peak_count = 0;
+// Simple peak detection state (currently unused - integrated into calculate_heart_rate)
 
 // Write to MAX30102 register
 static esp_err_t max30102_write_reg(uint8_t reg, uint8_t value) {
@@ -103,47 +100,82 @@ esp_err_t MAX30102_Init(void) {
   return ESP_OK;
 }
 
-// Simple heart rate calculation using peak detection
+// Optimized heart rate calculation using adaptive peak detection
 static int calculate_heart_rate(void) {
   if (!buffer_filled)
     return 0;
 
-  // Find peaks in IR signal (better for HR than red)
+  // Step 1: Calculate signal statistics (min, max, mean) for IR channel
+  uint32_t ir_min = UINT32_MAX, ir_max = 0;
+  uint64_t ir_sum = 0;
+  
+  for (int i = 0; i < BUFFER_SIZE; i++) {
+    if (ir_buffer[i] < ir_min)
+      ir_min = ir_buffer[i];
+    if (ir_buffer[i] > ir_max)
+      ir_max = ir_buffer[i];
+    ir_sum += ir_buffer[i];
+  }
+  
+  uint32_t ir_mean = ir_sum / BUFFER_SIZE;
+  uint32_t ir_amplitude = ir_max - ir_min;
+  
+  // Step 2: Signal quality check
+  // AC/DC ratio should be at least 1% for valid signal
+  // Minimum DC level: 10000 (sensor must be on skin)
+  if (ir_mean < 10000 || ir_amplitude < 100) {
+    return 0; // Signal too weak - sensor not on skin
+  }
+  
+  float ac_dc_ratio = (float)ir_amplitude / (float)ir_mean;
+  if (ac_dc_ratio < 0.01) {
+    return 0; // AC component too small - poor contact
+  }
+  
+  // Step 3: Adaptive threshold for peak detection
+  // Use mean + 30% of amplitude as threshold
+  uint32_t peak_threshold = ir_mean + (ir_amplitude * 30) / 100;
+  
+  // Step 4: Find peaks with improved detection
   int peaks = 0;
   uint32_t sum_intervals = 0;
-  uint32_t last_peak_idx = 0;
-
-  for (int i = 5; i < BUFFER_SIZE - 5; i++) {
-    // Check if this is a local maximum
-    bool is_peak = true;
-    for (int j = -5; j <= 5; j++) {
-      if (j != 0 && ir_buffer[i] < ir_buffer[i + j]) {
-        is_peak = false;
-        break;
+  int last_peak_idx = -1;
+  
+  for (int i = 3; i < BUFFER_SIZE - 3; i++) {
+    // Check if current sample is above threshold
+    if (ir_buffer[i] < peak_threshold)
+      continue;
+    
+    // Check if it's a local maximum (compare with neighbors)
+    if (ir_buffer[i] >= ir_buffer[i-1] && 
+        ir_buffer[i] >= ir_buffer[i-2] &&
+        ir_buffer[i] >= ir_buffer[i-3] &&
+        ir_buffer[i] > ir_buffer[i+1] && 
+        ir_buffer[i] > ir_buffer[i+2] &&
+        ir_buffer[i] > ir_buffer[i+3]) {
+      
+      // Avoid detecting same peak multiple times (min 30 samples = 0.3s apart)
+      if (last_peak_idx == -1 || (i - last_peak_idx) >= 30) {
+        if (last_peak_idx != -1) {
+          sum_intervals += (i - last_peak_idx);
+          peaks++;
+        }
+        last_peak_idx = i;
       }
-    }
-
-    // Also check if peak is above threshold (30% of max value)
-    if (is_peak && ir_buffer[i] > 50000) {
-      if (peaks > 0) {
-        sum_intervals += (i - last_peak_idx);
-      }
-      last_peak_idx = i;
-      peaks++;
     }
   }
 
   if (peaks < 2)
-    return 0;
+    return 0; // Need at least 2 intervals for reliable BPM
 
-  // Calculate average interval between peaks
-  uint32_t avg_interval = sum_intervals / (peaks - 1);
+  // Step 5: Calculate average interval between peaks
+  uint32_t avg_interval = sum_intervals / peaks;
 
-  // Convert to BPM (assuming 100 samples/sec)
+  // Step 6: Convert to BPM (100 samples/sec)
   // BPM = (60 seconds * 100 samples/sec) / samples_per_beat
   int bpm = (60 * 100) / avg_interval;
 
-  // Sanity check: typical heart rate is 40-200 BPM
+  // Step 7: Sanity check with expanded range
   if (bpm < 40 || bpm > 200)
     return 0;
 
@@ -256,6 +288,27 @@ esp_err_t MAX30102_ReadData(int *heart_rate, int *spo2) {
     if (buffer_filled) {
       *heart_rate = calculate_heart_rate();
       *spo2 = calculate_spo2();
+      
+      // Debug logging every 2 seconds (200 samples at 100Hz)
+      static int debug_counter = 0;
+      if (++debug_counter >= 200) {
+        debug_counter = 0;
+        
+        // Calculate signal stats for debugging
+        uint32_t ir_min = UINT32_MAX, ir_max = 0;
+        uint64_t ir_sum = 0;
+        for (int i = 0; i < BUFFER_SIZE; i++) {
+          if (ir_buffer[i] < ir_min) ir_min = ir_buffer[i];
+          if (ir_buffer[i] > ir_max) ir_max = ir_buffer[i];
+          ir_sum += ir_buffer[i];
+        }
+        uint32_t ir_mean = ir_sum / BUFFER_SIZE;
+        uint32_t ir_amp = ir_max - ir_min;
+        float ac_dc = (float)ir_amp / (float)ir_mean;
+        
+        ESP_LOGI(TAG, "Signal: DC=%lu, AC=%lu, AC/DC=%.3f, HR=%d", 
+                 ir_mean, ir_amp, ac_dc, *heart_rate);
+      }
     } else {
       *heart_rate = 0;
       *spo2 = 0;
