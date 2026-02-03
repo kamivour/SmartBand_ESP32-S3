@@ -11,7 +11,8 @@ static inline float round_2dp(float value) {
 int JSON_CreateSensorPacket(char *buffer, size_t buffer_size,
                             uint32_t timestamp, float pitch, float roll,
                             float svm, float gx, float gy, float gz,
-                            int heart_rate, int spo2, int battery) {
+                            int heart_rate, int spo2, int battery,
+                            int fall_status) {
   cJSON *root = cJSON_CreateObject();
   if (root == NULL) {
     return -1;
@@ -28,6 +29,8 @@ int JSON_CreateSensorPacket(char *buffer, size_t buffer_size,
   cJSON_AddNumberToObject(root, "hr", heart_rate); // Heart rate (BPM)
   cJSON_AddNumberToObject(root, "spo2", spo2);     // Blood oxygen (%)
   cJSON_AddNumberToObject(root, "bat", battery);
+  cJSON_AddNumberToObject(root, "fall",
+                          fall_status); // Fall detected (1) or normal (0)
 
   // Print to buffer (unformatted/compact)
   char *json_str = cJSON_PrintUnformatted(root);

@@ -28,6 +28,7 @@
 int JSON_CreateSensorPacket(char *buffer, size_t buffer_size,
                             uint32_t timestamp, float pitch, float roll,
                             float svm, float gx, float gy, float gz,
-                            int heart_rate, int spo2, int battery);
+                            int heart_rate, int spo2, int battery,
+                            int fall_status);
 
 #endif // JSON_UTILS_H

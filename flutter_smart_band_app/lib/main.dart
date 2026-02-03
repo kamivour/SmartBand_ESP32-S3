@@ -75,10 +75,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final List<SensorData> _buffer = [];
   String _label = 'Normal';
   static const _labels = ['Normal', 'Walking', 'Running', 'Falling', 'Lying Down'];
+  
+  // Fall Detection
+  bool _fallDetected = false;
+  Timer? _flashTimer;
+  bool _flashState = false;
 
   @override
   void dispose() {
     _disconnect();
+    _flashTimer?.cancel();
     super.dispose();
   }
 
@@ -100,6 +106,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _gySpots.add(FlSpot(_x, (d['gy'] as num).toDouble()));
       _gzSpots.add(FlSpot(_x, (d['gz'] as num).toDouble()));
       
+      // Check for fall detection
+      final fallStatus = (d['fall'] ?? 0);
+      if (fallStatus == 1 && !_fallDetected) {
+        _triggerFallAlert();
+      }
+      
       if (_isRecording) {
         _buffer.add(SensorData(
           timestamp: d['ts'], pitch: d['pitch'].toDouble(), roll: d['roll'].toDouble(),
@@ -107,6 +119,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           gz: d['gz'].toDouble(), 
           hr: (d['hr'] ?? 0).toInt(), spo2: (d['spo2'] ?? 0).toInt(),
           label: _label,
+          isFallDetected: fallStatus == 1,
         ));
       }
       
@@ -397,6 +410,76 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (mounted) setState(() { _isConnected = false; _connType = 'NONE'; _status = 'Disconnected'; });
   }
 
+  // Fall Detection Alert
+  void _triggerFallAlert() {
+    setState(() => _fallDetected = true);
+    
+    // Start flashing effect
+    _flashTimer?.cancel();
+    _flashTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
+      if (mounted) setState(() => _flashState = !_flashState);
+    });
+    
+    // Show dialog
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.red[900],
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Column(
+          children: [
+            const Icon(Icons.warning_amber_rounded, color: Color.fromARGB(255, 118, 241, 2), size: 80),
+            const SizedBox(height: 16),
+            const Text(
+              'FALL DETECTED!',
+              style: TextStyle(
+                color: Color.fromARGB(255, 39, 181, 0),
+                fontSize: 28,
+                fontWeight: FontWeight.bold,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+        content: const Text(
+          'The AI detected a potential fall event from user.',
+          style: TextStyle(color: Colors.white70, fontSize: 16),
+          textAlign: TextAlign.center,
+        ),
+        actions: [
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: () {
+                _dismissFallAlert();
+                Navigator.pop(ctx);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.white,
+                foregroundColor: Colors.red[900],
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              child: const Text(
+                "UNDERSTOOD",
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _dismissFallAlert() {
+    _flashTimer?.cancel();
+    setState(() {
+      _fallDetected = false;
+      _flashState = false;
+    });
+  }
+
   // Simulation
   void _startSimulation() async {
     await _disconnect();
@@ -646,16 +729,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF241E4E),
-      body: Column(
-        children: [
-          // Chart area
-          Container(
-            height: MediaQuery.of(context).size.height * 0.6,
-            color: const Color(0xFF181330),
-            padding: const EdgeInsets.fromLTRB(8, 40, 8, 8),
-            child: Column(
+    return Stack(
+      children: [
+        Scaffold(
+          backgroundColor: const Color(0xFF241E4E),
+          body: Column(
+            children: [
+              // Chart area
+              Container(
+                height: MediaQuery.of(context).size.height * 0.6,
+                color: const Color(0xFF181330),
+                padding: const EdgeInsets.fromLTRB(8, 40, 8, 8),
+                child: Column(
               children: [
                 // Controls
                 Row(
@@ -792,6 +877,41 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ],
       ),
+        ),
+        // Red flash overlay for fall detection
+        if (_fallDetected && _flashState)
+          Container(
+            color: Colors.red.withValues(alpha: 0.4),
+            child: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.warning_amber_rounded,
+                    size: 120,
+                    color: Colors.white.withValues(alpha: 0.9),
+                  ),
+                  const SizedBox(height: 20),
+                  const Text(
+                    'FALL DETECTED',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 42,
+                      fontWeight: FontWeight.bold,
+                      shadows: [
+                        Shadow(
+                          blurRadius: 10,
+                          color: Colors.black,
+                          offset: Offset(2, 2),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
     );
   }
 

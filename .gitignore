@@ -62,3 +62,4 @@ dependencies.lock
 managed_components/
 .cache/
 ESP32_IDF_SmartBand/refs/
+AI_main/

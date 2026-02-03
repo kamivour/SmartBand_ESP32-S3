@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "mpu6050.c"
         "max30102.c"
+        "inference.c"
         "kalman_filter.c"
         "wifi_manager.c"
         "ble_server.c"
